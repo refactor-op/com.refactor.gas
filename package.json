@@ -1,18 +1,12 @@
 {
-  "name": "cn.refactor.gas",
+  "name": "com.refactor.gas",
   "displayName": "Refactor Gas",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Gas.",
   "unity": "2021.3",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/refactor-op/cn.refactor.gas.git"
-  },
-  "files": [
-    "package.json",
-    "Runtime/",
-    "Tests/",
-    "README.md"
-  ]
+    "url": "https://github.com/refactor-op/com.refactor.gas.git"
+  }
 }
