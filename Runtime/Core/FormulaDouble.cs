@@ -1,32 +1,32 @@
-﻿#nullable enable
 using System;
 using System.Runtime.CompilerServices;
 
-namespace Refactor.Gameplay.Attributes
+namespace Refactor.Gas
 {
     public readonly struct FormulaDouble : IFormula<double>
     {
         private readonly byte[] _bytecode;
-        private readonly int _slotCount;
         private readonly int _maxStackDepth;
 
         internal FormulaDouble(byte[] bytecode, int slotCount, int maxStackDepth)
         {
-            _bytecode = bytecode;
-            _slotCount = slotCount;
+            _bytecode      = bytecode;
+            SlotCount      = slotCount;
             _maxStackDepth = maxStackDepth;
         }
 
-        public int SlotCount => _slotCount;
+        public int SlotCount { get; }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public double Calculate(double baseValue, ReadOnlySpan<double> slots)
         {
-            Span<double> stack = stackalloc double[_maxStackDepth];
-            var stackPtr = 0;
+            if (_bytecode == null || _bytecode.Length == 0)
+                return baseValue;
+
+            Span<double> stack    = stackalloc double[_maxStackDepth];
+            var          stackPtr = 0;
 
             ReadOnlySpan<byte> code = _bytecode;
-            var pc = 0;
+            var                pc   = 0;
 
             while (pc < code.Length)
             {
@@ -39,39 +39,55 @@ namespace Refactor.Gameplay.Attributes
                         break;
 
                     case OpCode.LoadSlot:
-                        {
-                            var slotIndex = ReadInt32(code, ref pc);
-                            var value = slotIndex < slots.Length ? slots[slotIndex] : 0.0;
-                            stack[stackPtr++] = value;
-                        }
+                    {
+                        var slotIndex = ReadInt32(code, ref pc);
+                        var value     = slotIndex < slots.Length ? slots[slotIndex] : default;
+                        stack[stackPtr++] = value;
                         break;
+                    }
 
                     case OpCode.LoadConstant:
-                        {
-                            var value = ReadDouble(code, ref pc);
-                            stack[stackPtr++] = value;
-                        }
+                    {
+                        var value = ReadDouble(code, ref pc);
+                        stack[stackPtr++] = value;
                         break;
+                    }
 
                     case OpCode.Add:
-                        {
-                            var b = stack[--stackPtr];
-                            var a = stack[--stackPtr];
-                            stack[stackPtr++] = a + b;
-                        }
+                    {
+                        var b = stack[--stackPtr];
+                        var a = stack[--stackPtr];
+                        stack[stackPtr++] = a + b;
                         break;
+                    }
+
+                    case OpCode.Subtract:
+                    {
+                        var b = stack[--stackPtr];
+                        var a = stack[--stackPtr];
+                        stack[stackPtr++] = a - b;
+                        break;
+                    }
 
                     case OpCode.Multiply:
-                        {
-                            var b = stack[--stackPtr];
-                            var a = stack[--stackPtr];
-                            stack[stackPtr++] = a * b;
-                        }
+                    {
+                        var b = stack[--stackPtr];
+                        var a = stack[--stackPtr];
+                        stack[stackPtr++] = a * b;
                         break;
+                    }
+
+                    case OpCode.Divide:
+                    {
+                        var b = stack[--stackPtr];
+                        var a = stack[--stackPtr];
+                        stack[stackPtr++] = a / b;
+                        break;
+                    }
                 }
             }
 
-            return stack[0];
+            return stackPtr > 0 ? stack[stackPtr - 1] : baseValue;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -83,10 +99,23 @@ namespace Refactor.Gameplay.Attributes
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static double ReadDouble(ReadOnlySpan<byte> code, ref int pc)
+        private static long ReadInt64(ReadOnlySpan<byte> code, ref int pc)
         {
-            var bits = (long)ReadInt32(code, ref pc) | ((long)ReadInt32(code, ref pc) << 32);
-            return BitConverter.Int64BitsToDouble(bits);
+            var value =
+                code[pc] |
+                ((long)code[pc + 1] << 8) |
+                ((long)code[pc + 2] << 16) |
+                ((long)code[pc + 3] << 24) |
+                ((long)code[pc + 4] << 32) |
+                ((long)code[pc + 5] << 40) |
+                ((long)code[pc + 6] << 48) |
+                ((long)code[pc + 7] << 56);
+            pc += 8;
+            return value;
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static double ReadDouble(ReadOnlySpan<byte> code, ref int pc) =>
+            BitConverter.Int64BitsToDouble(ReadInt64(code, ref pc));
     }
 }

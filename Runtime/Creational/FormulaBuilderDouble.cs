@@ -1,159 +1,114 @@
-﻿using System;
+using System;
 using System.Buffers;
-using System.Runtime.CompilerServices;
 
-namespace Refactor.Gameplay.Attributes
+namespace Refactor.Gas
 {
-    /// <summary>
-    /// Double 属性的公式构建器.
-    /// </summary>
     public ref struct FormulaBuilderDouble
     {
-        private const int InitialBufferSize = 64;
-        private const int MaxBufferSize     = 65536;
+        private static readonly ArrayPool<byte> Pool = ArrayPool<byte>.Shared;
 
-        private static readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
-        private                 byte[]          _buffer;
-        private                 int             _position;
-        private                 int             _maxSlot;
+        private byte[] _buffer;
+        private int _index;
 
-        private FormulaBuilderDouble(int initialCapacity)
-        {
-            _buffer   = _pool.Rent(initialCapacity);
-            _position = 0;
-            _maxSlot  = -1;
-        }
-
-        public static FormulaBuilderDouble Create() => new(InitialBufferSize);
-
-        public FormulaBuilderDouble LoadBase()
-        {
-            var span = GetSpan(1);
-            span[0] = (byte)OpCode.LoadBase;
-            Advance(1);
-            return this;
-        }
-
-        public FormulaBuilderDouble LoadSlot(int slotIndex)
-        {
-            if (slotIndex > _maxSlot)
-                _maxSlot = slotIndex;
-
-            var span = GetSpan(5);
-            span[0] = (byte)OpCode.LoadSlot;
-            WriteInt32(span[1..], slotIndex);
-            Advance(5);
-            return this;
-        }
-
-        public FormulaBuilderDouble LoadConstant(double value)
-        {
-            var span = GetSpan(9);
-            span[0] = (byte)OpCode.LoadConstant;
-            WriteDouble(span[1..], value);
-            Advance(9);
-            return this;
-        }
-
-        public FormulaBuilderDouble Add()
-        {
-            var span = GetSpan(1);
-            span[0] = (byte)OpCode.Add;
-            Advance(1);
-            return this;
-        }
-
-        public FormulaBuilderDouble Multiply()
-        {
-            var span = GetSpan(1);
-            span[0] = (byte)OpCode.Multiply;
-            Advance(1);
-            return this;
-        }
+        internal static FormulaBuilderDouble Create(int size) =>
+            new()
+            {
+                _buffer = Pool.Rent(size),
+                _index  = 0
+            };
 
         public FormulaDouble Build()
         {
-            if (_position == 0)
-                throw new InvalidOperationException("Formula cannot be empty!");
+            var length   = _index;
+            var bytecode = new byte[length];
+            _buffer.AsSpan(0, length).CopyTo(bytecode);
 
-            // 1. 创建精确大小的字节码数组.
-            var bytecode = new byte[_position];
-            Array.Copy(_buffer, 0, bytecode, 0, _position);
-            
-            // 2. 归还缓冲区.
-            _pool.Return(_buffer);
-            _buffer = null; // 标记为 null 防止重用.
-
-            // 3. 验证并计算元数据.
-            Validate(bytecode);
-            var maxStackDepth = CalculateMaxStackDepth(bytecode);
-
-            // 4. 返回最终的不可变公式对象.
-            return new FormulaDouble(bytecode, _maxSlot + 1, maxStackDepth);
+            Analyze(bytecode, out var slotCount, out var maxStackDepth);
+            return new FormulaDouble(bytecode, slotCount, maxStackDepth);
         }
+
+        public void LoadBase() => WriteOpCode(OpCode.LoadBase);
+
+        public void LoadSlot(int slotIndex)
+        {
+            if (slotIndex < 0) throw new ArgumentOutOfRangeException(nameof(slotIndex));
+            WriteOpCode(OpCode.LoadSlot);
+            WriteInt32(slotIndex);
+        }
+
+        public void LoadConstant(double value)
+        {
+            WriteOpCode(OpCode.LoadConstant);
+            WriteDouble(value);
+        }
+
+        public void Add() => WriteOpCode(OpCode.Add);
+
+        public void Subtract() => WriteOpCode(OpCode.Subtract);
+
+        public void Multiply() => WriteOpCode(OpCode.Multiply);
+
+        public void Divide() => WriteOpCode(OpCode.Divide);
 
         #region Private
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private Span<byte> GetSpan(int sizeHint)
+        internal void WriteOpCode(OpCode op)
         {
-            EnsureCapacity(_position + sizeHint);
-            return _buffer.AsSpan(_position);
+            EnsureCapacity(1);
+            _buffer[_index++] = (byte)op;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void Advance(int count) => _position += count;
-
-        private void EnsureCapacity(int capacity)
+        internal void WriteInt32(int value)
         {
-            if (capacity > _buffer.Length)
-                Grow(capacity);
+            EnsureCapacity(4);
+            _buffer[_index + 0] =  (byte)value;
+            _buffer[_index + 1] =  (byte)(value >> 8);
+            _buffer[_index + 2] =  (byte)(value >> 16);
+            _buffer[_index + 3] =  (byte)(value >> 24);
+            _index              += 4;
+        }
+
+        internal void WriteInt64(long value)
+        {
+            EnsureCapacity(8);
+            _buffer[_index + 0] =  (byte)value;
+            _buffer[_index + 1] =  (byte)(value >> 8);
+            _buffer[_index + 2] =  (byte)(value >> 16);
+            _buffer[_index + 3] =  (byte)(value >> 24);
+            _buffer[_index + 4] =  (byte)(value >> 32);
+            _buffer[_index + 5] =  (byte)(value >> 40);
+            _buffer[_index + 6] =  (byte)(value >> 48);
+            _buffer[_index + 7] =  (byte)(value >> 56);
+            _index              += 8;
+        }
+
+        internal void WriteDouble(double value) => WriteInt64(BitConverter.DoubleToInt64Bits(value));
+
+        private void EnsureCapacity(int sizeHint)
+        {
+            var required = _index + sizeHint;
+            if (required <= _buffer.Length)
+                return;
+            Grow(required);
         }
 
         private void Grow(int minCapacity)
         {
             var newSize = Math.Max(_buffer.Length * 2, minCapacity);
-            newSize = Math.Min(newSize, MaxBufferSize);
 
-            if (newSize <= _buffer.Length)
-                throw new InvalidOperationException($"Formula exceeds maximum size!");
-
-            var newBuffer = _pool.Rent(newSize);
-            Array.Copy(_buffer, 0, newBuffer, 0, _position);
-            _pool.Return(_buffer);
+            var oldBuffer = _buffer;
+            var newBuffer = Pool.Rent(newSize);
+            oldBuffer.AsSpan(0, _index).CopyTo(newBuffer);
+            Pool.Return(oldBuffer, true);
             _buffer = newBuffer;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void WriteInt32(Span<byte> span, int value)
+        private static void Analyze(byte[] bytecode, out int slotCount, out int maxStackDepth)
         {
-            span[0] = (byte)value;
-            span[1] = (byte)(value >> 8);
-            span[2] = (byte)(value >> 16);
-            span[3] = (byte)(value >> 24);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void WriteInt64(Span<byte> span, long value)
-        {
-            span[0] = (byte)value;
-            span[1] = (byte)(value >> 8);
-            span[2] = (byte)(value >> 16);
-            span[3] = (byte)(value >> 24);
-            span[4] = (byte)(value >> 32);
-            span[5] = (byte)(value >> 40);
-            span[6] = (byte)(value >> 48);
-            span[7] = (byte)(value >> 56);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void WriteDouble(Span<byte> span, double value) =>
-            WriteInt64(span, BitConverter.DoubleToInt64Bits(value));
-
-        private static void Validate(byte[] bytecode)
-        {
-            var pc         = 0; // 程序计数器
-            var stackDepth = 0;
+            var pc           = 0;
+            var stackDepth   = 0;
+            var maxDepth     = 0;
+            var maxSlotIndex = -1;
 
             while (pc < bytecode.Length)
             {
@@ -163,78 +118,63 @@ namespace Refactor.Gameplay.Attributes
                 {
                     case OpCode.LoadBase:
                         stackDepth++;
+                        maxDepth = Math.Max(maxDepth, stackDepth);
                         break;
 
                     case OpCode.LoadSlot:
-                        if (pc + 4 > bytecode.Length) throw new InvalidOperationException("Incomplete LoadSlot!");
-                        pc += 4; // 4-byte int
+                        if (pc + 4 > bytecode.Length)
+                            throw new InvalidOperationException("Invalid formula bytecode.");
+                        var slotIndex = ReadInt32(bytecode, pc);
+                        pc += 4;
+                        if (slotIndex < 0)
+                            throw new InvalidOperationException("Slot index cannot be negative.");
+                        if (slotIndex > maxSlotIndex)
+                            maxSlotIndex = slotIndex;
                         stackDepth++;
+                        maxDepth = Math.Max(maxDepth, stackDepth);
                         break;
 
                     case OpCode.LoadConstant:
-                        if (pc + 8 > bytecode.Length) throw new InvalidOperationException("Incomplete LoadConstant!");
-                        pc += 8; // 8-byte double
+                        if (pc + 8 > bytecode.Length)
+                            throw new InvalidOperationException("Invalid formula bytecode.");
+                        pc += 8;
                         stackDepth++;
+                        maxDepth = Math.Max(maxDepth, stackDepth);
                         break;
 
                     case OpCode.Add:
+                    case OpCode.Subtract:
                     case OpCode.Multiply:
+                    case OpCode.Divide:
                         if (stackDepth < 2)
-                            throw new InvalidOperationException("Stack underflow!");
+                            throw new InvalidOperationException("Invalid formula bytecode.");
                         stackDepth -= 1;
                         break;
 
                     default:
-                        throw new InvalidOperationException("Unknown OpCode!");
+                        throw new InvalidOperationException("Invalid formula bytecode.");
                 }
             }
 
-            if (stackDepth != 1)
-                throw new InvalidOperationException("Unbalanced formula!");
+            if (bytecode.Length != 0 && stackDepth != 1)
+                throw new InvalidOperationException("Invalid formula bytecode.");
+
+            slotCount     = maxSlotIndex + 1;
+            maxStackDepth = maxDepth;
         }
 
-        private static int CalculateMaxStackDepth(byte[] bytecode)
-        {
-            var pc            = 0;
-            var stackDepth    = 0;
-            var maxStackDepth = 0;
-
-            while (pc < bytecode.Length)
-            {
-                var opCode = (OpCode)bytecode[pc++];
-
-                switch (opCode)
-                {
-                    case OpCode.LoadBase:
-                        stackDepth++;
-                        maxStackDepth = Math.Max(maxStackDepth, stackDepth);
-                        break;
-                        
-                    case OpCode.LoadSlot:
-                        pc += 4; // 4-byte int
-                        stackDepth++;
-                        maxStackDepth = Math.Max(maxStackDepth, stackDepth);
-                        break;
-
-                    case OpCode.LoadConstant:
-                        pc += 8; // 8-byte double
-                        stackDepth++;
-                        maxStackDepth = Math.Max(maxStackDepth, stackDepth);
-                        break;
-
-                    case OpCode.Add:
-                    case OpCode.Multiply:
-                        stackDepth -= 1;
-                        break;
-                }
-            }
-
-            if (maxStackDepth > 255)
-                throw new InvalidOperationException("Stack depth exceeds maximum size!");
-
-            return maxStackDepth;
-        }
+        private static int ReadInt32(byte[] buffer, int offset) =>
+            buffer[offset] | (buffer[offset + 1] << 8) | (buffer[offset + 2] << 16) | (buffer[offset + 3] << 24);
 
         #endregion
+
+        public void Dispose()
+        {
+            var toReturn = _buffer;
+            this = default;
+
+            if (toReturn != null)
+                Pool.Return(toReturn, true);
+        }
     }
 }
